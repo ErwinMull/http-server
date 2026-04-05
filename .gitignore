@@ -1,0 +1,4 @@
+*.bak
+*.out
+*.o
+main
