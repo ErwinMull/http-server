@@ -102,20 +102,21 @@ int send_all_from_buf(const int fd, struct buf *b)
 
 /* =========================== ACCEPT AND HANDLE ============================ */
 
-void accept_and_handle(const int sock_fd)
+void accept_and_handle_loop(const int sock_fd)
 {
 	int new_fd;
 	struct sockaddr_storage their_addr;
 	socklen_t sin_size = sizeof(their_addr);
 	struct buf b = BUF_INIT;
 
-	new_fd = accept(sock_fd, (struct sockaddr *)&their_addr, &sin_size);
-
-	recv_all_to_buf(new_fd, &b);
-
-	printf("Received: %s (%ld bytes)\n", b.str, b.size);
-
-	send_all_from_buf(new_fd, &b);
+	while (true) {
+		new_fd = accept(sock_fd, (struct sockaddr *)&their_addr, &sin_size);
+		recv_all_to_buf(new_fd, &b);
+		printf("Received: %s (%ld bytes)\n", b.str, b.size);
+		send_all_from_buf(new_fd, &b);
+		reset_buf(&b);
+		close(new_fd);
+	}
 
 	return;
 }
@@ -210,7 +211,7 @@ int main (int argc, char **argv)
 
 	printf("Server startup\n");
 
-	accept_and_handle(sock_fd);
+	accept_and_handle_loop(sock_fd);
 
 	close(sock_fd);
 
