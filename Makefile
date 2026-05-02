@@ -3,8 +3,8 @@
 CC := gcc
 CFLAGS := -Wall -Wextra -pedantic
 
-main: main.c
-	$(CC) $< -o $@ $(CFLAGS)
+main: main.c scanner.c
+	$(CC) $^ -o $@ $(CFLAGS)
 
 debug: CFLAGS += -g
 debug: main

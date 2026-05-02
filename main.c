@@ -16,86 +16,205 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 
+#include "scanner.h"
+
 /* =============================== CONSTANTS ================================ */
 
 #define DEFAULT_PORT "8080"
 #define BACKLOG 10
+#define CHUNK_SIZE 1024
+
+/* ============================== STATUS CODES ============================== */
+
+typedef enum {
+	STAT_OK = 0,
+
+	STAT_ERR_MEMORY,
+	STAT_ERR_IO
+} Status;
 
 /* ================================= BUFFER ================================= */
 
-struct buf {
-	char *str;
-	size_t size;
-};
+#define BUFFER_MIN_SIZE 256
 
-#define BUF_INIT { 0 , 0 }
+typedef struct {
+	char *data;
+	size_t count;
+	size_t capacity;
+} Buffer;
 
-int append_buf(struct buf *b, char *str, size_t size)
+Status buf_append(Buffer *b, char *str, size_t size)
 {
-	char *tmp = realloc(b->str, b->size + size);
-	if (NULL == tmp) {
-		fprintf(stderr, "Memory allocation for buffer failed\n");
-		return -1;
+	size_t required = b->count + size;
+
+	if (b->count + size > b->capacity) {
+		size_t new_capacity = b->capacity ? b->capacity :
+			BUFFER_MIN_SIZE;
+		while (new_capacity < required) {
+			new_capacity *= 2;
+		}
+
+		char *tmp = realloc(b->data, new_capacity);
+		if (!tmp)
+			return STAT_ERR_MEMORY;
+
+		b->data = tmp;
+		b->capacity = new_capacity;
 	}
 
-	strncpy(tmp + b->size, str, size);
-	b->str = tmp;
-	b->size += size;
+	memcpy(b->data + b->count, str, size);
+	b->count += size;
 
-	return 1;
+	return STAT_OK;
 }
 
-void reset_buf(struct buf *b)
+void buf_free(Buffer *b)
 {
-	free(b->str);
-	b->str = NULL;
-	b->size = 0;
+	free(b->data);
+	b->data = NULL;
+	b->count = 0;
+	b->capacity = 0;
 }
 
 /* =========================== RECV & SEND + BUF ============================ */
 
-#define CHUNK_SIZE 1 << 11
-
-int recv_all_to_buf(const int fd, struct buf *b)
+Status recv_all_to_buf(const int fd, Buffer *b)
 {
 	ssize_t nrecv;
 	char chunk[CHUNK_SIZE];
+	Status status;
 
 	while (true) {
 		nrecv = recv(fd, chunk, sizeof(chunk), 0);
-		if (-1 == nrecv) {
-			perror("recv");
-			return -1;
-		}
+		if (-1 == nrecv)
+			return STAT_ERR_IO;
 
-		append_buf(b, chunk, (size_t)nrecv);
+		status = buf_append(b, chunk, (size_t)nrecv);
+		if (STAT_OK != status)
+			return status;
 
 		if (CHUNK_SIZE > nrecv)
 			break;
 	}
 
-	return 0;
+	return STAT_OK;
 }
 
-int send_all_from_buf(const int fd, struct buf *b)
+Status send_all_from_buf(const int fd, Buffer *b)
 {
 	size_t total_sent = 0;
 	ssize_t nsend;
 	size_t to_send;
 	size_t remaining;
 
-	while (total_sent < b->size) {
-		remaining = b->size - total_sent;
+	while (total_sent < b->count) {
+		remaining = b->count - total_sent;
 		to_send = remaining < CHUNK_SIZE ? remaining : CHUNK_SIZE;
 
-		nsend = send(fd, b->str + total_sent, to_send, 0);
-		if (-1 == nsend) {
-			perror("send");
-			return -1;
-		}
+		nsend = send(fd, b->data + total_sent, to_send, 0);
+		if (-1 == nsend)
+			return STAT_ERR_IO;
 
 		total_sent += (size_t)nsend;
 	}
+
+	return STAT_OK;
+}
+
+/* ============================= FILE HANDLING ============================== */
+
+Status read_file_contents_to_buffer(const char *path, Buffer *b)
+{
+	FILE *fp = NULL;
+	size_t len = 0;
+	char chunk[CHUNK_SIZE];
+	size_t nread = 0;
+	size_t total_read = 0;
+	Status status;
+
+	fp = fopen(path, "r");
+	if (NULL == fp) {
+		return STAT_ERR_IO;
+	}
+
+	fseek(fp, 0L, SEEK_END);
+	len = ftell(fp);
+	fseek(fp, 0L, SEEK_SET);
+
+	while (total_read < len) {
+		nread = fread(chunk, sizeof(char), CHUNK_SIZE, fp);
+		total_read += nread;
+
+		if (0 == nread && total_read != len)
+			return STAT_ERR_IO;
+
+		status = buf_append(b, chunk, nread);
+
+		if (STAT_OK != status)
+			return status;
+	}
+
+	fclose(fp);
+
+	return STAT_OK;
+}
+
+/* ============================= HANDLE_METHODS ============================= */
+
+int handle_get(Buffer *b, String *target)
+{
+	char line[] = "HTTP/1.1 200 OK\r\n\r\n";
+	char *str = NULL;
+	size_t str_len = 0;
+	size_t offset = 0;
+
+	buf_append(b, line, strlen(line));
+	if (1 == target->len && '/' == target->ptr[0]) {
+		read_file_contents_to_buffer("index.html", b);
+	} else {
+		str_len = target->len + 1;
+		if ('/' == target->ptr[0]) {
+			offset = 1;
+			str_len -= 1;
+		}
+		str = malloc(str_len);
+		if (NULL == str) {
+			return -1;
+		}
+		strncpy(str, target->ptr + offset, str_len - 1);
+		str[str_len - 1] = '\0';
+		read_file_contents_to_buffer(str, b);
+		free(str);
+	}
+
+	return 0;
+}
+
+int handle_client(const int client_fd)
+{
+	Scanner s = { 0 };
+	HTTPMethod verb;
+	String target = { 0 };
+	HTTPTargetOutcome hto;
+	Buffer b_in = { 0 };
+	Buffer b_out = { 0 };
+
+	recv_all_to_buf(client_fd, &b_in);
+
+	s.src = b_in.data;
+	s.len = b_in.count;
+
+	verb = scan_method(&s);
+	hto = scan_target(&s, &target);
+
+	if (VALID_TARGET == hto && HTTPMETHOD_GET == verb) {
+		handle_get(&b_out, &target);
+	}
+
+	send_all_from_buf(client_fd, &b_out);
+
+	buf_free(&b_in);
+	buf_free(&b_out);
 
 	return 0;
 }
@@ -104,18 +223,16 @@ int send_all_from_buf(const int fd, struct buf *b)
 
 void accept_and_handle_loop(const int sock_fd)
 {
-	int new_fd;
-	struct sockaddr_storage their_addr;
-	socklen_t sin_size = sizeof(their_addr);
-	struct buf b = BUF_INIT;
+	int client_fd;
+	struct sockaddr_storage client_addr;
+	socklen_t sin_size = sizeof(client_addr);
 
 	while (true) {
-		new_fd = accept(sock_fd, (struct sockaddr *)&their_addr, &sin_size);
-		recv_all_to_buf(new_fd, &b);
-		printf("Received: %s (%ld bytes)\n", b.str, b.size);
-		send_all_from_buf(new_fd, &b);
-		reset_buf(&b);
-		close(new_fd);
+		client_fd = accept(sock_fd,
+				(struct sockaddr *)&client_addr,
+				&sin_size);
+		handle_client(client_fd);
+		close(client_fd);
 	}
 
 	return;
