@@ -1,58 +1,50 @@
 #ifndef SCANNER_H_
 #define SCANNER_H_
 
-/* =============================== CONSTANTS ================================ */
-
-#define URI_MAX_SIZE 2048
-#define REQUEST_LINE_AND_HEADER_MAX_SIZE 8192
-
-/* ================================= ENUMS ================================== */
-
-typedef enum {
-	HTTPMETHOD_INVALID = 0,
-	HTTPMETHOD_GET
-} HTTPMethod;
-
-typedef enum {
-	VALID_TARGET = 0,
-	TARGET_TOO_LONG,
-	MALFORMED_TARGET,
-	MALICIOUS_TARGET
-} HTTPTargetOutcome;
-
-typedef enum {
-	INVALID_HTTPVERSION = 0,
-	HTTP_1_1,
-} HTTPVersion;
-
-/* ================================ STRUCTS ================================= */
+/* ================================= STRING ================================= */
 
 typedef struct {
 	char   *ptr;
 	size_t  len;
 } String;
 
-#define INIT_STRING { NULL, 0 }
+#define S(X) (String) { (X), (int) sizeof(X)-1 }
 
-typedef struct {
-	char   *src;
-	size_t  len;
-	size_t  cur;
-} Scanner;
+/* ================================== HTTP ================================== */
 
-#define INIT_SCANNER { NULL, 0, 0 }
+typedef enum {
+	HTTPMETHOD_GET
+} HTTPMethod;
+
+typedef enum {
+	HTTP_1_1,
+} HTTPVersion;
 
 typedef struct {
 	String name;
 	String value;
 } Header;
 
-#define INIT_HEADER { INIT_STRING, INIT_STRING }
+#define URI_MAX_SIZE 2048
+#define REQUEST_LINE_AND_HEADER_MAX_SIZE 8192
 
-/* =============================== PROCEDURES =============================== */
+/* ================================ SCANNER ================================= */
 
-HTTPMethod scan_method(Scanner *s);
-HTTPTargetOutcome scan_target(Scanner *s, String *x);
-HTTPVersion scan_version(Scanner *s);
+typedef enum {
+	SCAN_OK = 0,
+
+	SCAN_ERR_UNKNOWN_HTTP_METHOD,
+	SCAN_ERR_UNKNOWN_HTTP_VERSION,
+} ScanResult;
+
+typedef struct {
+	size_t len;
+	size_t cur;
+	char *src;
+} Scanner;
+
+ScanResult consume_method(Scanner *s, HTTPMethod *method);
+ScanResult consume_target(Scanner *s, String *x);
+ScanResult consume_version(Scanner *s, HTTPVersion *version);
 
 #endif // SCANNER_H_

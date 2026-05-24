@@ -5,10 +5,6 @@
 
 #include "scanner.h"
 
-/* ================================= MACROS ================================= */
-
-#define S(X) (String) { (X), (int) sizeof(X)-1 }
-
 /* ========================== CHARACTER PREDICATES ========================== */
 
 bool is_digit(char c)
@@ -34,28 +30,35 @@ bool is_tchar(char c)
 		|| is_digit(c) || is_alpha(c);
 }
 
-/* ================================ CONSUME ================================= */
+/* ============================ SIMPLE CONSUMING ============================ */
 
 bool consume_str(Scanner *s, String x)
 {
-	if (x.len == 0)
+	if (x.len == 0) {
 		return false;
+	}
 
-	if (x.len > s->len - s->cur)
+	if (x.len > s->len - s->cur) {
 		return false;
+	}
 
-	for (size_t i = 0; i < x.len; i++)
-		if (s->src[s->cur+i] != x.ptr[i])
+	for (size_t i = 0; i < x.len; i++) {
+		if (s->src[s->cur+i] != x.ptr[i]) {
 			return false;
+		}
+	}
 
 	s->cur += x.len;
+
 	return true;
 }
 
 bool consume_space(Scanner *s)
 {
-	while (s->len > s->cur && is_space(s->src[s->cur]))
+	while (s->len > s->cur && is_space(s->src[s->cur])) {
 		s->cur++;
+	}
+
 	return true;
 }
 
@@ -68,24 +71,24 @@ bool consume_crlf(Scanner *s)
 	}
 
 	s->cur += 2;
+
 	return true;
 }
 
-/* ================================ PARSING ================================= */
+/* =========================== ADVANCED CONSUMING =========================== */
 
-HTTPMethod scan_method(Scanner *s)
+ScanResult consume_method(Scanner *s, HTTPMethod *method)
 {
-	if (0 != s->cur) {
-		// TODO: better way to handle call on non-zero index?
-		return HTTPMETHOD_INVALID;
-	} else if (consume_str(s, S("GET "))) {
-		return HTTPMETHOD_GET;
+	if (consume_str(s, S("GET "))) {
+		*method = HTTPMETHOD_GET;
+	} else {
+		return SCAN_ERR_UNKNOWN_HTTP_METHOD;
 	}
 
-	return HTTPMETHOD_INVALID;
+	return SCAN_OK;
 }
 
-HTTPTargetOutcome scan_target(Scanner *s, String *x)
+ScanResult consume_target(Scanner *s, String *x)
 {
 	size_t target_start = s->cur;
 
@@ -96,14 +99,16 @@ HTTPTargetOutcome scan_target(Scanner *s, String *x)
 	x->ptr = s->src + target_start;
 	x->len = s->cur - target_start;
 
-	return VALID_TARGET;
+	return SCAN_OK;
 }
 
-HTTPVersion scan_version(Scanner *s)
+ScanResult consume_version(Scanner *s, HTTPVersion *version)
 {
 	if (consume_str(s, S("HTTP/1.1"))) {
-		return HTTP_1_1;
+		*version = HTTP_1_1;
+	} else {
+		return SCAN_ERR_UNKNOWN_HTTP_METHOD;
 	}
 
-	return INVALID_HTTPVERSION;
+	return SCAN_OK;
 }

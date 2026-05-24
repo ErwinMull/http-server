@@ -18,123 +18,130 @@
 
 #include "scanner.h"
 
-/* =============================== CONSTANTS ================================ */
+/* ================================= CONFIG ================================= */
 
 #define DEFAULT_PORT "8080"
 #define BACKLOG 10
 #define CHUNK_SIZE 1024
+#define BUFFER_MIN_CAP 1024
 
-/* ============================== STATUS CODES ============================== */
+/* ============================== RESULT CODES ============================== */
 
 typedef enum {
-	STAT_OK = 0,
+	RES_OK = 0,
 
-	STAT_ERR_MEMORY,
-	STAT_ERR_IO
-} Status;
+	RES_ERR_MEMORY,
+	RES_ERR_IO,
+	RES_ERR_OVERFLOW
+} Result;
 
 /* ================================= BUFFER ================================= */
 
-#define BUFFER_MIN_SIZE 256
-
 typedef struct {
+	size_t len;
+	size_t cap;
 	char *data;
-	size_t count;
-	size_t capacity;
 } Buffer;
 
-Status buf_append(Buffer *b, char *str, size_t size)
+Result buf_append(Buffer *b, const char *str, size_t size)
 {
-	size_t required = b->count + size;
+	size_t required = b->len + size;
 
-	if (b->count + size > b->capacity) {
-		size_t new_capacity = b->capacity ? b->capacity :
-			BUFFER_MIN_SIZE;
+	if (SIZE_MAX < required) {
+		return RES_ERR_OVERFLOW;
+	}
+
+	if (b->len + size > b->cap) {
+		size_t new_capacity = b->cap ? b->cap : BUFFER_MIN_CAP;
 		while (new_capacity < required) {
 			new_capacity *= 2;
 		}
 
 		char *tmp = realloc(b->data, new_capacity);
-		if (!tmp)
-			return STAT_ERR_MEMORY;
-
+		if (!tmp) {
+			return RES_ERR_MEMORY;
+		}
 		b->data = tmp;
-		b->capacity = new_capacity;
+		b->cap = new_capacity;
 	}
 
-	memcpy(b->data + b->count, str, size);
-	b->count += size;
+	memcpy(b->data + b->len, str, size);
+	b->len += size;
 
-	return STAT_OK;
+	return RES_OK;
 }
 
 void buf_free(Buffer *b)
 {
 	free(b->data);
 	b->data = NULL;
-	b->count = 0;
-	b->capacity = 0;
+	b->len = 0;
+	b->cap = 0;
 }
 
-/* =========================== RECV & SEND + BUF ============================ */
+/* =============================== SOCKET I/O =============================== */
 
-Status recv_all_to_buf(const int fd, Buffer *b)
+Result recv_all_to_buf(const int fd, Buffer *b)
 {
 	ssize_t nrecv;
 	char chunk[CHUNK_SIZE];
-	Status status;
+	Result r;
 
 	while (true) {
 		nrecv = recv(fd, chunk, sizeof(chunk), 0);
-		if (-1 == nrecv)
-			return STAT_ERR_IO;
+		if (-1 == nrecv) {
+			return RES_ERR_IO;
+		}
 
-		status = buf_append(b, chunk, (size_t)nrecv);
-		if (STAT_OK != status)
-			return status;
+		r = buf_append(b, chunk, (size_t)nrecv);
+		if (RES_OK != r) {
+			return r;
+		}
 
-		if (CHUNK_SIZE > nrecv)
+		if (CHUNK_SIZE > nrecv) {
 			break;
+		}
 	}
 
-	return STAT_OK;
+	return RES_OK;
 }
 
-Status send_all_from_buf(const int fd, Buffer *b)
+Result send_all_from_buf(const int fd, Buffer *b)
 {
 	size_t total_sent = 0;
 	ssize_t nsend;
 	size_t to_send;
 	size_t remaining;
 
-	while (total_sent < b->count) {
-		remaining = b->count - total_sent;
+	while (total_sent < b->len) {
+		remaining = b->len - total_sent;
 		to_send = remaining < CHUNK_SIZE ? remaining : CHUNK_SIZE;
 
 		nsend = send(fd, b->data + total_sent, to_send, 0);
-		if (-1 == nsend)
-			return STAT_ERR_IO;
+		if (-1 == nsend) {
+			return RES_ERR_IO;
+		}
 
 		total_sent += (size_t)nsend;
 	}
 
-	return STAT_OK;
+	return RES_OK;
 }
 
 /* ============================= FILE HANDLING ============================== */
 
-Status read_file_contents_to_buffer(const char *path, Buffer *b)
+Result read_file_contents_to_buffer(const char *path, Buffer *b)
 {
 	FILE *fp = NULL;
 	size_t len = 0;
 	char chunk[CHUNK_SIZE];
 	size_t nread = 0;
 	size_t total_read = 0;
-	Status status;
+	Result status;
 
 	fp = fopen(path, "r");
 	if (NULL == fp) {
-		return STAT_ERR_IO;
+		return RES_ERR_IO;
 	}
 
 	fseek(fp, 0L, SEEK_END);
@@ -146,17 +153,17 @@ Status read_file_contents_to_buffer(const char *path, Buffer *b)
 		total_read += nread;
 
 		if (0 == nread && total_read != len)
-			return STAT_ERR_IO;
+			return RES_ERR_IO;
 
 		status = buf_append(b, chunk, nread);
 
-		if (STAT_OK != status)
+		if (RES_OK != status)
 			return status;
 	}
 
 	fclose(fp);
 
-	return STAT_OK;
+	return RES_OK;
 }
 
 /* ============================= HANDLE_METHODS ============================= */
@@ -193,22 +200,30 @@ int handle_get(Buffer *b, String *target)
 int handle_client(const int client_fd)
 {
 	Scanner s = { 0 };
-	HTTPMethod verb;
 	String target = { 0 };
-	HTTPTargetOutcome hto;
 	Buffer b_in = { 0 };
 	Buffer b_out = { 0 };
+
+	HTTPMethod method;
+	ScanResult r;
 
 	recv_all_to_buf(client_fd, &b_in);
 
 	s.src = b_in.data;
-	s.len = b_in.count;
+	s.len = b_in.len;
 
-	verb = scan_method(&s);
-	hto = scan_target(&s, &target);
+	r = consume_method(&s, &method);
+	if (SCAN_OK != r) {
+		// TODO: HTTP ERROR
+		return -1;
+	}
 
-	if (VALID_TARGET == hto && HTTPMETHOD_GET == verb) {
+	r = consume_target(&s, &target);
+	if (SCAN_OK == r && HTTPMETHOD_GET == method) {
 		handle_get(&b_out, &target);
+	} else {
+		// TODO: NOT IMPLEMENTED
+		return -1;
 	}
 
 	send_all_from_buf(client_fd, &b_out);
